@@ -1,0 +1,191 @@
+---
+title: "A24_R_Yohan"
+author: "Yohan"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+```{r echo = FALSE }
+library(dplyr)
+library(tidyr)
+library(tidytext)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+```
+
+#### Loading the data from source
+```{r}
+load("Enron.Rdata")
+```
+
+### Preprocessing of Employeelist table
+#### Reshape to long format, Remove empty or NA emails and Clean and standardize status
+```{r}
+employeelist_new = employeelist %>%
+  pivot_longer(cols = c(Email_id, Email2, Email3, EMail4),
+               values_to = "email",
+               names_to = NULL) %>%
+  filter(!is.na(email) & email != "") %>%
+  mutate(status = trimws(status),
+         status = ifelse(is.na(status) | status == "", "N/A", status))
+```
+
+### Preprocessing of message table
+#### Convert date column to proper Date format, Keep only reasonable date range (e.g., 1970 - 2023)
+```{r}
+message_new = message %>%
+  mutate(date = as.Date(date)) %>%
+  filter(date >= as.Date("1999-01-01") & date <= as.Date("2002-12-31"))
+summary(message_new$date)
+```
+#### Join message_clean with recipientinfo on mid, keep date and Extract sender and recipient domains, and classify communication type
+```{r echo = FALSE}
+email_edges = message_new %>%
+  inner_join(recipientinfo, by = "mid") %>%
+  select(sender, rvalue, date) %>%  # Include date here
+  rename(recipient = rvalue)
+
+email_edges = email_edges %>%
+  mutate(
+    sender_domain = sub(".*@", "", sender),
+    recipient_domain = sub(".*@", "", recipient),
+    communication_type = ifelse(sender_domain == recipient_domain, "internal", "outside")
+  )
+
+head(email_edges)
+```
+#### Sender time series and Recipient time series
+```{r}
+activity_sender_time <- email_edges %>%
+  filter(!is.na(date)) %>%
+  count(date, email = sender)
+
+activity_recipient_time <- email_edges %>%
+  filter(!is.na(date)) %>%
+  count(date, email = recipient)
+```
+
+#### Sender counts, Recipient counts, and Overall (sender + recipient) counts
+
+```{r}
+activity_sender <- email_edges %>%
+  count(email = sender)
+
+activity_recipient <- email_edges %>%
+  count(email = recipient)
+
+activity_overall <- full_join(activity_sender, activity_recipient, by = "email") %>%
+  mutate(across(c(n.x, n.y), ~replace_na(., 0))) %>%
+  mutate(n = n.x + n.y) %>%
+  select(email, n)
+```
+
+### Creating Sender,Recipient and combine them to make Activity timeplot
+```{r}
+sender_df <- activity_sender_time %>%
+  group_by(date) %>%
+  summarise(total = sum(n, na.rm = TRUE)) %>%
+  mutate(type = "Sender")
+
+recipient_df <- activity_recipient_time %>%
+  group_by(date) %>%
+  summarise(total = sum(n, na.rm = TRUE)) %>%
+  mutate(type = "Recipient")
+
+combined_df <- bind_rows(sender_df, recipient_df)
+```
+
+## Create new data frame for enron special events 
+```{r echo = FALSE }
+enron_events = data.frame(
+  Date = c("1999-05-24", "2000-01-20", "2000-05-05", "2001-02-15",  "2001-08-14", "2001-10-31", "2001-12-02"),
+  Event = c(
+    "Tim Belden, head of Enron's West Coast Trading Desk in Portland Oregon, conducts his first experiment to exploit the new rules of California's deregulated energy market. Known as the Silverpeak Incident, Belden creates congestion on power lines which causes electricity prices to rise and at a cost to California of $7 million. This will be the first of many 'games' that Belden and his operation play to exploit 'opportunities' in the California market.",
+    "Annual Analysts Meeting. First day -- Skilling: 'EES [Enron Energy Services]' is just rockin' and rollin.'' Second Day: Enron rolls out its Broadband plan. Scott McNealy, of Sun Microsystems, shows up to offer his support. By end of day, stock rises 26% to new high of $67.25.",
+    " Enron trader, in an email to colleagues, announces 'Death Star,' a new strategy to game the California market.",
+    " Mark Palmer, head of publicity for Enron, and Fastow go to Fortune to answer questions. Fastow to Bethany McLean: 'I don't care what you say about the company. Just don't make me look bad.'",
+    " Skilling's Resignation Announcement. In evening, analyst and investor conference call. Skilling: 'The company is in great shape…' Lay: 'Company is in the strongest shape that it's ever been in.' Lay is named CEO. Skilling's Resignation Announcement. In evening, analyst and investor conference call. Skilling: 'The company is in great shape…' Lay: 'Company is in the strongest shape that it's ever been in.' Lay is named CEO.",
+    " Enron announces the SEC inquiry has been upgraded to a formal investigation.",
+    " Enron files for Chapter 11 bankruptcy protection, at the time the largest bankruptcy in US history."
+  )
+)
+enron_events$Date <- as.Date(enron_events$Date)
+
+head(enron_events)
+```
+
+## Preprocessing of Referenceinfo table
+```{r echo = FALSE }
+referenceinfo_new <- referenceinfo %>%
+  mutate(
+    # Extract 'from'
+    from = str_match(reference, "(?i)From:\\s*([^\\n\\r]+?)\\s*To:")[, 2],
+
+    # Extract date sent
+    date_sent_raw = str_match(reference, "(?i)Sent:\\s*([A-Za-z]+,\\s+[A-Za-z]+\\s+\\d{1,2},\\s+\\d{4}\\s+\\d{1,2}:\\d{2}\\s+[AP]M)")[, 2],
+    date_sent = parse_date_time(date_sent_raw, orders = "A, B d, Y I:M p", tz = "GMT"),
+
+    # Extract time and date before removing date_sent
+    time_sent = format(date_sent, "%H:%M:%S"),
+    date = as.Date(date_sent),
+
+    # Clean 'from'
+    from = str_remove(from, "(?i)Sent:.*$"),
+
+    # Extract subject
+    message_text = str_match(reference, "(?i)Subject:\\s*(.*?)(\\n|\\r|$)")[, 2]
+  ) %>%
+  select(-date_sent_raw, -date_sent, reference) %>%
+  filter(date >= as.Date("1999-01-01") & date <= as.Date("2002-12-31"))
+
+referenceinfo_new[6, ]
+```
+
+### Creating bing_sentiments_unique, message_reference and sentiment_time_series for TAB3
+
+#### Deduplicate Bing sentiment lexicon once, Generate message_reference (merge messages with referenceinfo), and Sentiment Time Series (used in sentimentPlot)
+```{r}
+bing_sentiments_unique <- get_sentiments("bing") %>%
+  distinct(word, .keep_all = TRUE)
+
+message_reference <- message_new %>%
+  select(-date) %>%
+  left_join(referenceinfo_new, by = "mid") %>%
+  filter(!is.na(rfid))
+
+sentiment_time_series <- message_reference %>%
+  filter(!is.na(message_text), !is.na(date)) %>%
+  mutate(date = as.Date(date)) %>%
+  unnest_tokens(word, message_text) %>%
+  inner_join(bing_sentiments_unique, by = "word") %>%
+  count(date, sentiment) %>%
+  tidyr::pivot_wider(names_from = sentiment, values_from = n, values_fill = list(n = 0)) %>%
+  mutate(net_sentiment = positive - negative)
+```
+#### Creating word frequency table
+```{r }
+word_freq <- message_reference %>%
+  filter(!is.na(message_text)) %>%
+  unnest_tokens(word, message_text) %>%
+  anti_join(stop_words, by = "word") %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 20)  # or adjust threshold as needed
+```
+
+
+## Save the cleaned data for making Shiny App 
+```{r }
+save(employeelist_new, message_new, email_edges, recipientinfo, referenceinfo, enron_events,
+     message_reference, activity_sender, activity_recipient, activity_overall,
+     activity_sender_time, activity_recipient_time, combined_df, sentiment_time_series, word_freq,
+     file = "Enron_cleaned.RData")
+
+cat("✅ Cleaned data saved successfully.")
+```
+
